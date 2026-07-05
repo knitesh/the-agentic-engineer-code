@@ -11,3 +11,5 @@ pgvector==0.3.*              # Ch6: vector type adapter for psycopg
 langgraph-checkpoint-postgres==2.0.*   # Ch6/Ch11: durable checkpointer
 langfuse==3.*                # Ch9: tracing; Ch10: datasets + experiments
 langchain==0.3.*             # Ch9: required by langfuse.langchain CallbackHandler
+fastapi==0.115.*             # Ch11: the serving layer (service.py)
+uvicorn==0.30.*              # Ch11: ASGI server for service.py
