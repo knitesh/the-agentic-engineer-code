@@ -64,6 +64,9 @@ class HarnessConfig:
     allowed_pii: list[str] = field(default_factory=list)   # output guard (7.4)
     max_actions_per_run: int = 24        # per-run action budget (7.3)
     max_supervisor_steps: int = 8        # NEW: ceiling on supervisor delegations
+    # --- observability (9.4) ---
+    tracing_enabled: bool = False        # Langfuse tracing, wired in the harness
+    env: str = "dev"                     # trace tag: dev | staging | prod
 
 
 ## The shared module-level config (imported as `from agent.config import CONFIG`

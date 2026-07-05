@@ -11,6 +11,11 @@ from agent.errors import InvalidInput, HarnessTimeout
 
 if TYPE_CHECKING:
     from agent.config import HarnessConfig
+
+## agent/harness.py — the ONE place observability is wired in.
+## The graph and every node remain untouched and unaware.
+from langfuse import get_client
+from langfuse.langchain import CallbackHandler
 ## --- Provider transient errors ------------------------------------------------
 ## Different providers raise different transient errors. Rather than scatter
 ## provider-specific imports through the harness, we normalize them into one
@@ -66,7 +71,7 @@ class RunHandle:
 
 
 class AgentHarness:
-    def __init__(self, compiled_graph, config: "HarnessConfig", sinks):
+    def __init__(self, compiled_graph, config, sinks):
         self.app = compiled_graph
         self.config = config
         self.sinks = sinks
@@ -75,12 +80,32 @@ class AgentHarness:
         # re-entry handling (3.15)
         self.active_runs = {}
         self.re_entry_policy = config.re_entry_policy
+        # One handler for the harness; the singleton client is created lazily.
+        self._trace = get_client() if config.tracing_enabled else None
+        self._handler = CallbackHandler() if config.tracing_enabled else None
 
     def _initial_state(self, message: str) -> dict:
         # delegates to the same injector contract from 3.2 — seeds EVERY field
         return inject_input({"message": message})
 
-    def run_safe(self, message: str, thread_id: str | None = None) -> dict:
+    def _run_config(self, thread_id: str | None, user_id: str | None) -> dict:
+        cfg = {
+            "configurable": {"thread_id": thread_id or "default"},
+            "recursion_limit": self.config.recursion_limit,
+        }
+        if self._handler:                      # tracing is OPTIONAL, fail-open
+            cfg["callbacks"] = [self._handler]
+            cfg["run_name"] = "agent-run"      # the trace's display name
+            cfg["metadata"] = {
+                # These three keys are read by the Langfuse handler specifically.
+                "langfuse_session_id": thread_id or "default",   # ties to Ch6 thread
+                "langfuse_user_id": user_id or "anonymous",
+                "langfuse_tags": [self.config.model.name, self.config.env],
+            }
+        return cfg
+
+    def run_safe(self, message: str, thread_id: str | None = None,
+                 user_id: str | None = None) -> dict:
         """The single execution core every run mode goes through.
         CONTRACT: never raises. All paths return a dict with at least 'status'."""
         started = time.time()
@@ -91,11 +116,9 @@ class AgentHarness:
             except InvalidInput as e:
                 return {"status": "rejected", "error": str(e), "exit_reason": "invalid_input"}
 
-            # 2. CONTEXT MANAGEMENT: per-run config handed to the graph
-            run_config = {
-                "configurable": {"thread_id": thread_id or "default"},
-                "recursion_limit": self.config.recursion_limit,
-            }
+            # 2. CONTEXT MANAGEMENT: per-run config handed to the graph,
+            # now including the Ch9 trace handler + trace metadata (9.4)
+            run_config = self._run_config(thread_id, user_id)
 
             # 3. ENVIRONMENT CONTROL: timeout + retries + error handling
             result = self._execute_with_environment_control(state, run_config)
@@ -103,6 +126,7 @@ class AgentHarness:
             # 4. OUTPUT CAPTURE: route metrics; return answer
             result["latency_ms"] = int((time.time() - started) * 1000)
             self._capture(result)
+            self._score_run(result)      # Ch9: exit_reason -> trace score (9.6)
             return result
         except Exception as e:
             # Last-resort net so the CONTRACT holds even if capture/config misbehaves.
@@ -122,6 +146,24 @@ class AgentHarness:
         except Exception as e:
             # capture failures must NEVER fail a run
             self.sinks.errors.log(f"metrics capture failed: {e!r}")
+
+    ## In the harness, after a run completes — turn exit_reason into a trace score.
+    def _score_run(self, result: dict) -> None:
+        if not self._trace:
+            return
+        try:
+            # A clean exit is a 1; any abnormal stop is a 0. Coarse, but honest.
+            good = result.get("exit_reason") == "goal_achieved"
+            self._trace.create_score(
+                trace_id=self._handler.last_trace_id,   # the trace we just made
+                name="clean_exit",
+                value=1 if good else 0,
+                data_type="NUMERIC",
+                comment=result.get("exit_reason") or "unknown",
+            )
+        except Exception as e:
+            # Scoring, like all observability, must never fail a run.
+            self.sinks.errors.log(f"scoring failed: {e!r}")
 
     def _invoke_with_timeout(self, state, run_config) -> dict:
         """REAL wall-clock timeout around the BLOCKING invoke.

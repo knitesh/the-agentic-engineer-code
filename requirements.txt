@@ -9,3 +9,5 @@ httpx==0.27.*                # Ch5: the web_search tool's HTTP client
 psycopg[binary]==3.2.*       # Ch6: one Postgres, two roles (checkpointer + memory)
 pgvector==0.3.*              # Ch6: vector type adapter for psycopg
 langgraph-checkpoint-postgres==2.0.*   # Ch6/Ch11: durable checkpointer
+langfuse==3.*                # Ch9: tracing; Ch10: datasets + experiments
+langchain==0.3.*             # Ch9: required by langfuse.langchain CallbackHandler
