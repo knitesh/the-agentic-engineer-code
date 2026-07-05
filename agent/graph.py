@@ -59,11 +59,18 @@ def build_guarded_agent(config: "HarnessConfig"):
             [SystemMessage(content=REASON_SYSTEM_PROMPT)] + state["messages"]
         )
         usage = response.response_metadata.get("token_usage", {})
-        return {
+        update = {
             "messages": [response],
             "iterations": state["iterations"] + 1,
             "tokens_used": state["tokens_used"] + usage.get("total_tokens", 0),
         }
+        # Ch12: declare the proposed action so the approval gate (12.3) can show
+        # the human exactly what it is about to approve.
+        tool_calls = getattr(response, "tool_calls", None) or []
+        if tool_calls:
+            call = tool_calls[0]
+            update["pending_action"] = {"tool": call["name"], "args": call["args"]}
+        return update
 
     def route(state: AgentState) -> str:
         decision = evaluate_exit(state, config)    # all budgets + deadlock + verify
@@ -188,8 +195,10 @@ def build_guarded_agent(config: "HarnessConfig"):
     graph.add_edge("output_guard", "finalize")
     graph.add_edge("finalize", END)
 
-    return graph.compile(checkpointer=checkpointer,      # Ch6 shared checkpointer
-                         interrupt_before=["approval"])
+    # Ch12: the approval node now pauses ITSELF via interrupt() (12.3), so the
+    # static interrupt_before from Ch7 is no longer needed — the node runs,
+    # halts inside interrupt(), and resumes on Command(resume=...).
+    return graph.compile(checkpointer=checkpointer)      # Ch6 shared checkpointer
 
 
 @lru_cache(maxsize=None)

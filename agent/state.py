@@ -24,3 +24,6 @@ class AgentState(TypedDict):
     # --- Ch7-added fields (declared additions; seeded by the injector / 8.3) ---
     guard_block: str | None                       # input-guard verdict (7.8)
     approval_granted: bool                        # human decision at the gate (7.8/Ch12)
+    # --- Ch12-added fields (declared additions) ---
+    pending_action: dict | None                   # tool+args proposed by reason (12.3)
+    rejection_reason: str | None                  # human's reason on rejection (12.3)

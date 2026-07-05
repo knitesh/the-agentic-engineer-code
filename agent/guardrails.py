@@ -153,17 +153,32 @@ def output_guardrail_node(state: AgentState) -> dict:
                 "status": "blocked"}                        # fail closed
     return {}
 
-## --- APPROVAL (Ch12 builds the full flow; the shape is here) --------------
-def approval_node(state: AgentState) -> dict:
-    """The graph pauses BEFORE this node (interrupt_before). On resume, the
-    human's decision is supplied; here we just read it. Full UI/flow in Ch12."""
-    return {}                                             # decision read from state/resume
+## --- APPROVAL (the full Ch12 flow) -----------------------------------------
+from langgraph.types import interrupt, Command
+
+def describe_action(pending: dict) -> str:
+    """Repo glue: human-readable "about to do X" preview for the approver."""
+    return f"About to run `{pending.get('tool')}` with args {pending.get('args')}"
+
+def approval_node(state):
+    """Pause for human approval of a high-stakes pending tool call.
+    interrupt() halts the graph and persists state; the run resumes when a
+    human sends Command(resume=...). Requires a checkpointer (Ch11)."""
+    pending = state["pending_action"]            # tool + args proposed by reason
+    decision = interrupt({                        # <-- graph pauses HERE
+        "type": "approval_request",
+        "tool": pending["tool"],
+        "args": pending["args"],
+        "reason": pending.get("rationale", ""),
+        "preview": describe_action(pending),      # human-readable "about to do X"
+    })
+    # Execution resumes here when Command(resume=decision) is sent.
+    if decision.get("approved"):
+        return {"approval_granted": True}
+    return {"approval_granted": False,
+            "rejection_reason": decision.get("reason", "rejected by human")}
 
 def after_approval(state: AgentState) -> str:
     """Conditional edge after the human responds: approve -> execute, reject ->
     back to reason with the rejection recorded as an observation."""
     return "approved" if state.get("approval_granted") else "rejected"
-
-## authorize_tool_call, CallVerdict, CallDecision: as defined in 7.3 (capability
-## scope, arg validation, action budget, approval gate). Imported by graph.py
-## for the routing edge and by guarded_act_node for the per-call wrapper.

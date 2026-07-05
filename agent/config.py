@@ -67,6 +67,8 @@ class HarnessConfig:
     # --- observability (9.4) ---
     tracing_enabled: bool = False        # Langfuse tracing, wired in the harness
     env: str = "dev"                     # trace tag: dev | staging | prod
+    # --- human oversight (12.3) ---
+    approval_threshold: float = 100.0    # graduated gate: amounts above this pause
 
 
 ## The shared module-level config (imported as `from agent.config import CONFIG`

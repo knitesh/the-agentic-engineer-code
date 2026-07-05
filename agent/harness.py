@@ -12,7 +12,7 @@ from agent.errors import InvalidInput, HarnessTimeout
 if TYPE_CHECKING:
     from agent.config import HarnessConfig
 
-## agent/harness.py — the ONE place observability is wired in.
+## Ch9: observability is wired in the harness — the ONE place (9.4).
 ## The graph and every node remain untouched and unaware.
 from langfuse import get_client
 from langfuse.langchain import CallbackHandler
@@ -59,23 +59,10 @@ def inject_input(raw_request: dict) -> dict:
         # Ch7-added fields (8.3 calls these out): guard verdict + human decision
         "guard_block": None,
         "approval_granted": False,
+        # Ch12-added fields: the proposed action + the human's reason on rejection
+        "pending_action": None,
+        "rejection_reason": None,
     }
-
-
-
-def _serializable_state(state: dict) -> dict:
-    """Repo glue (Ch10): make the final graph state JSON-friendly for evaluators.
-    Ch3's action_history holds (tool, frozenset(args)) tuples; evaluators read
-    'tool:args' strings (10.3), so serialize the signatures that way. Message
-    transcripts stay in the trace, not the eval payload."""
-    out = dict(state or {})
-    out["action_history"] = [
-        f"{sig[0]}:{sorted(sig[1])}" if isinstance(sig, tuple) else str(sig)
-        for sig in out.get("action_history", [])
-    ]
-    out.pop("messages", None)
-    out["seen_signatures"] = [str(s) for s in out.get("seen_signatures", [])]
-    return out
 
 
 @dataclass
@@ -87,7 +74,7 @@ class RunHandle:
 
 
 class AgentHarness:
-    def __init__(self, compiled_graph, config, sinks):
+    def __init__(self, compiled_graph, config: "HarnessConfig", sinks):
         self.app = compiled_graph
         self.config = config
         self.sinks = sinks
@@ -96,7 +83,7 @@ class AgentHarness:
         # re-entry handling (3.15)
         self.active_runs = {}
         self.re_entry_policy = config.re_entry_policy
-        # One handler for the harness; the singleton client is created lazily.
+        # One handler for the harness; the singleton client is created lazily (9.4).
         self._trace = get_client() if config.tracing_enabled else None
         self._handler = CallbackHandler() if config.tracing_enabled else None
 
@@ -144,6 +131,21 @@ class AgentHarness:
                 result.pop("final_state", None)
 
             # 4. OUTPUT CAPTURE: route metrics; return answer
+            # Ch12: if the graph paused at the approval gate, surface the pause
+            # so callers (run_with_approval, the service) can collect a decision.
+            if result.get("status") == "ok":
+                try:
+                    snapshot = self.app.get_state(run_config)
+                    if snapshot.next:                       # paused mid-run
+                        interrupts = [i for t in snapshot.tasks
+                                      for i in getattr(t, "interrupts", ())]
+                        result["status"] = "interrupted"
+                        result["exit_reason"] = "awaiting_approval"
+                        result["interrupt_payload"] = (
+                            interrupts[0].value if interrupts else {})
+                except Exception:
+                    pass                                    # graphs without checkpointers
+
             result["latency_ms"] = int((time.time() - started) * 1000)
             self._capture(result)
             self._score_run(result)      # Ch9: exit_reason -> trace score (9.6)
@@ -206,8 +208,7 @@ class AgentHarness:
                     "final_answer": final_state.get("final_answer"),
                     "iterations": final_state.get("iterations", 0),
                     "exit_reason": final_state.get("exit_reason", "goal_achieved"),
-                    # surfaced only when run_safe(..., return_state=True) — Ch10
-                    "final_state": _serializable_state(final_state),
+                    "final_state": final_state,     # surfaced only via return_state (Ch10)
                 }
             except GraphRecursionError:
                 # Hit LangGraph's recursion limit — the catastrophe net fired,
@@ -226,6 +227,27 @@ class AgentHarness:
                 return {"status": "error", "error": str(e), "exit_reason": "fatal"}
         return {"status": "error", "exit_reason": "retries_exhausted",
                 "error": f"exhausted retries: {last_error!r}"}
+
+    def resume(self, thread_id: str, command) -> dict:
+        """Ch12: resume a paused run from its checkpoint with the human's
+        decision (a langgraph Command(resume=...)). Same never-raise contract."""
+        try:
+            run_config = self._run_config(thread_id, None)
+            final_state = self._invoke_with_timeout(command, run_config)
+            snapshot = self.app.get_state(run_config)
+            if snapshot.next:                                # paused again
+                interrupts = [i for t in snapshot.tasks
+                              for i in getattr(t, "interrupts", ())]
+                return {"status": "interrupted",
+                        "exit_reason": "awaiting_approval",
+                        "interrupt_payload": interrupts[0].value if interrupts else {}}
+            return {"status": "ok",
+                    "final_answer": final_state.get("final_answer"),
+                    "iterations": final_state.get("iterations", 0),
+                    "exit_reason": final_state.get("exit_reason", "goal_achieved")}
+        except Exception as e:
+            self.sinks.errors.log(f"resume failed: {e!r}")
+            return {"status": "error", "error": str(e), "exit_reason": "resume_fault"}
 
     ## --- Run modes (3.7) ---------------------------------------------------
 
