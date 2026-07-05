@@ -1,4 +1,5 @@
-## agent/config.py — HarnessConfig + the four sub-configs (3.6)
+## agent/config.py — HarnessConfig + the four sub-configs (3.6);
+## ToolConfig default updated to the real suite (5.6).
 from dataclasses import dataclass, field
 
 
@@ -11,10 +12,12 @@ class ModelConfig:
     window_strategy: str = "summarize"            # "truncate"|"summarize"|"retain"
 
 
+## agent/config.py — ToolConfig default updated to the real suite.
 @dataclass
 class ToolConfig:
-    enabled_tools: list[str] = field(default_factory=lambda: ["calculator", "web_search"])
-    # tools the agent may NOT use in this context, even if registered globally
+    enabled_tools: list[str] = field(default_factory=lambda: [
+        "calculator", "web_search", "read_file", "write_file",
+    ])
     denied_tools: list[str] = field(default_factory=list)
 
 
@@ -49,3 +52,5 @@ class HarnessConfig:
     stall_threshold: int = 3           # iterations of no progress -> divergence (3.12)
     # re-entry policy (3.15): "reject" | "queue" | "interrupt" | "incorporate"
     re_entry_policy: str = "queue"
+    # --- action boundaries (5.7) — pre-wired here, consumed by Ch7's approval gate ---
+    require_approval: bool = False
