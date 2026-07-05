@@ -1,45 +1,34 @@
 ## agent/tools.py
-import ast
-import operator as op
+from langchain_core.tools import tool
 
-## Only these AST node types and operators are permitted. Anything else
-## (names, calls, attribute access, etc.) is rejected — no arbitrary code runs.
-_ALLOWED_BINOPS = {
-    ast.Add: op.add, ast.Sub: op.sub, ast.Mult: op.mul,
-    ast.Div: op.truediv, ast.Pow: op.pow, ast.Mod: op.mod,
-    ast.FloorDiv: op.floordiv,
-}
-_ALLOWED_UNARYOPS = {ast.UAdd: op.pos, ast.USub: op.neg}
+from agent.safe import safe_eval               # never bare eval (Ch2)
 
-def safe_eval(expression: str) -> float:
-    """Evaluate a numeric arithmetic expression safely via AST parsing.
-    Supports + - * / // % ** and parentheses. Rejects anything else."""
-    def _eval(node):
-        if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
-            return node.value
-        if isinstance(node, ast.BinOp) and type(node.op) in _ALLOWED_BINOPS:
-            return _ALLOWED_BINOPS[type(node.op)](_eval(node.left), _eval(node.right))
-        if isinstance(node, ast.UnaryOp) and type(node.op) in _ALLOWED_UNARYOPS:
-            return _ALLOWED_UNARYOPS[type(node.op)](_eval(node.operand))
-        raise ValueError(f"unsupported expression element: {ast.dump(node)}")
+## Placeholder search plumbing — these are the "two toys" Chapter 5 replaces
+## with the real, contract-driven suite (5.6).
+def search_api(query: str) -> list[dict]:
+    return [{"title": f"Result for: {query}",
+             "snippet": "Placeholder search result — replaced by the real suite in Ch5."}]
 
-    tree = ast.parse(expression, mode="eval")
-    return _eval(tree.body)
+def format_results(results: list[dict]) -> str:
+    return "\n".join(f"{i+1}. {r['title']}\n   {r['snippet']}"
+                     for i, r in enumerate(results))
 
 
+@tool
 def calculator(expression: str) -> str:
-    """Evaluate a basic arithmetic expression. Returns the result, or an
-    explicit error string the agent can reason about."""
+    """Evaluate a basic arithmetic expression. Returns result or an error."""
     try:
-        return str(safe_eval(expression))
+        return str(safe_eval(expression))      # never bare eval (Ch2)
     except Exception as e:
-        # Explicit, actionable failure (§2.2): never return None, never raise
-        # silently. The error tells the model exactly what to fix.
         return f"ERROR: could not evaluate '{expression}': {e}"
 
+@tool
+def web_search(query: str) -> str:
+    """Search the web. Returns a short ranked list of results, or an error."""
+    try:
+        return format_results(search_api(query))
+    except Exception as e:
+        return f"ERROR: search failed for '{query}': {e}"
 
-## The name -> callable registry. Chapter 3's config enables tools BY NAME
-## (e.g. ["calculator", "web_search"]) and resolves them against this map.
-TOOLS = {
-    "calculator": calculator,
-}
+TOOLS = [calculator, web_search]
+TOOLS_BY_NAME = {t.name: t for t in TOOLS}
