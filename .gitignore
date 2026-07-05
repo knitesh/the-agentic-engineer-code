@@ -1,0 +1,14 @@
+# Secrets — never commit real keys
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+
+# OS
+.DS_Store
+
+# Agent workspace (Ch5 file tools write here)
+workspace/

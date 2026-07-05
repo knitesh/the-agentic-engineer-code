@@ -1,0 +1,7 @@
+# requirements.txt — pinned so every chapter builds the same way
+# (stack pinned as of this book's publication; current LangGraph is v1.x — verify before upgrading)
+langgraph==0.2.*
+langchain-core==0.3.*
+langchain-openai==0.2.*      # swap for your provider's integration package
+pydantic==2.*
+python-dotenv==1.*           # load OPENAI_API_KEY from .env at startup
