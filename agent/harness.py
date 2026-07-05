@@ -62,6 +62,22 @@ def inject_input(raw_request: dict) -> dict:
     }
 
 
+
+def _serializable_state(state: dict) -> dict:
+    """Repo glue (Ch10): make the final graph state JSON-friendly for evaluators.
+    Ch3's action_history holds (tool, frozenset(args)) tuples; evaluators read
+    'tool:args' strings (10.3), so serialize the signatures that way. Message
+    transcripts stay in the trace, not the eval payload."""
+    out = dict(state or {})
+    out["action_history"] = [
+        f"{sig[0]}:{sorted(sig[1])}" if isinstance(sig, tuple) else str(sig)
+        for sig in out.get("action_history", [])
+    ]
+    out.pop("messages", None)
+    out["seen_signatures"] = [str(s) for s in out.get("seen_signatures", [])]
+    return out
+
+
 @dataclass
 class RunHandle:
     thread_id: str
@@ -105,7 +121,7 @@ class AgentHarness:
         return cfg
 
     def run_safe(self, message: str, thread_id: str | None = None,
-                 user_id: str | None = None) -> dict:
+                 user_id: str | None = None, return_state: bool = False) -> dict:
         """The single execution core every run mode goes through.
         CONTRACT: never raises. All paths return a dict with at least 'status'."""
         started = time.time()
@@ -122,6 +138,10 @@ class AgentHarness:
 
             # 3. ENVIRONMENT CONTROL: timeout + retries + error handling
             result = self._execute_with_environment_control(state, run_config)
+            # Ch10: a thin, declared flag — evals need the PATH, and the path
+            # lives in the final graph state (action_history, known_facts...).
+            if not return_state:
+                result.pop("final_state", None)
 
             # 4. OUTPUT CAPTURE: route metrics; return answer
             result["latency_ms"] = int((time.time() - started) * 1000)
@@ -186,6 +206,8 @@ class AgentHarness:
                     "final_answer": final_state.get("final_answer"),
                     "iterations": final_state.get("iterations", 0),
                     "exit_reason": final_state.get("exit_reason", "goal_achieved"),
+                    # surfaced only when run_safe(..., return_state=True) — Ch10
+                    "final_state": _serializable_state(final_state),
                 }
             except GraphRecursionError:
                 # Hit LangGraph's recursion limit — the catastrophe net fired,
