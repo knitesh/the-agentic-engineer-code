@@ -1,5 +1,6 @@
 ## agent/config.py — HarnessConfig + the four sub-configs (3.6);
-## ToolConfig default updated to the real suite (5.6).
+## ToolConfig default updated to the real suite (5.6); context budgets (6.4).
+import os
 from dataclasses import dataclass, field
 
 
@@ -12,11 +13,10 @@ class ModelConfig:
     window_strategy: str = "summarize"            # "truncate"|"summarize"|"retain"
 
 
-## agent/config.py — ToolConfig default updated to the real suite.
 @dataclass
 class ToolConfig:
     enabled_tools: list[str] = field(default_factory=lambda: [
-        "calculator", "web_search", "read_file", "write_file",
+        "calculator", "web_search", "read_file", "write_file", "remember",
     ])
     denied_tools: list[str] = field(default_factory=list)
 
@@ -54,3 +54,16 @@ class HarnessConfig:
     re_entry_policy: str = "queue"
     # --- action boundaries (5.7) — pre-wired here, consumed by Ch7's approval gate ---
     require_approval: bool = False
+    # --- context management budgets (6.4) ---
+    context_token_budget: int = 24_000   # compress when the window exceeds this
+    keep_recent: int = 8                 # messages kept verbatim after compression
+
+
+## The shared module-level config (imported as `from agent.config import CONFIG`
+## by Ch6's memory backend and the Ch6/Ch7 graph wiring).
+CONFIG = HarnessConfig(
+    memory=MemoryConfig(
+        backend="postgres" if os.environ.get("DATABASE_URL") else "memory",
+        connection_string=os.environ.get("DATABASE_URL"),
+    ),
+)

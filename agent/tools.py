@@ -122,6 +122,24 @@ def write_file(path: str, content: str) -> str:
         return f"ERROR: could not write '{path}': {e}."
 
 
+## --- MEMORY (Ch6) --------------------------------------------------------
+## agent/tools.py — add to the suite from 5.6.
+## `memory` is the shared SemanticMemory from agent/memory_backend.py.
+from agent.memory_backend import memory
+
+@tool(metadata={"kind": "write"})
+def remember(fact: str) -> str:
+    """Save a durable fact to long-term memory for future sessions.
+
+    Use this ONLY for information worth recalling later: user preferences,
+    stable facts about the user, important decisions, resolved issues. Do
+    NOT use it for transient details, this conversation's working notes, or
+    anything you can recompute. One clear fact per call.
+    """
+    # `memory` is the shared SemanticMemory from agent/memory_backend.py.
+    memory.remember(fact, metadata={"source": "agent", "kind": "fact"})
+    return f"Remembered: {fact}"
+
 ## --- THE REGISTRY --------------------------------------------------------
-TOOLS = [calculator, web_search, read_file, write_file]
+TOOLS = [calculator, web_search, read_file, write_file, remember]   # + Ch6
 TOOLS_BY_NAME = {t.name: t for t in TOOLS}

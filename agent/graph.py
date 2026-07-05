@@ -1,27 +1,16 @@
 ## agent/graph.py
 from langgraph.graph import StateGraph, END
-from langchain_core.messages import ToolMessage, SystemMessage
+from langchain_core.messages import ToolMessage, SystemMessage, RemoveMessage
 from agent.state import AgentState
-from agent.config import HarnessConfig
+from agent.config import CONFIG
 from agent.tools import TOOLS, TOOLS_BY_NAME
-from agent.prompt import SYSTEM_PROMPT
-from agent.loop import (
-    evaluate_exit,
-    detect_deadlock,
-    finalize_node as loop_finalize_node,
-    update_convergence_tracking,
-)  # from Ch3
+from agent.loop import evaluate_exit, finalize_node    # Ch3, unchanged
+## reason_node, act_node, route: from Ch4 (4.5), unchanged
+## compress_node: from 6.4
 
-
-def format_tool_result(call, result) -> str:
-    """Repo helper: normalize a tool result into observation text (3.14)."""
-    return str(result)
-
-## Repo wiring (implied by the chapter text): the shared model client, bound to
-## the tool suite, and the module-level CONFIG this graph closes over.
+## Repo wiring: the shared model client, bound to the tool suite.
 from langchain_openai import ChatOpenAI    # swap for your provider
 
-CONFIG = HarnessConfig()
 llm = ChatOpenAI(model=CONFIG.model.name, temperature=CONFIG.model.temperature)
 llm_with_tools = llm.bind_tools(TOOLS)
 
@@ -30,6 +19,8 @@ Think briefly about what you need before each action, then either call
 a tool or give your final answer. Call a tool only when you need
 information or computation you don't already have. When you have enough
 to answer, respond directly with no tool call."""
+
+## --- Ch4 nodes, unchanged (4.5) -------------------------------------------
 
 def reason_node(state: AgentState) -> dict:
     """PERCEIVE + REASON. Tracks the token budget Ch3's exit logic reads."""
@@ -49,12 +40,10 @@ def act_node(state: AgentState) -> dict:
     results = []
     seen = set(state.get("seen_signatures", set()))
     history = list(state.get("action_history", []))
-    for call in getattr(last, "tool_calls", None) or []:
+    for call in last.tool_calls:                         # dict access (LangChain)
         signature = (call["name"], frozenset(call["args"].items()))
         history.append(signature)
         if signature in seen:
-            # Same guard as Ch3 3.14: feed the fact of repetition back into
-            # perception so the next reason step can change approach.
             results.append(ToolMessage(
                 content=(f"NOTE: you already ran {call['name']} with these exact "
                          f"arguments and it did not advance the goal. Do NOT "
@@ -82,130 +71,123 @@ def route(state: AgentState) -> str:
         return "reason_with_feedback"          # criteria-not-met push-back (Ch3)
     last = state["messages"][-1]
     if not getattr(last, "tool_calls", None):
-        return "finalize"                      # model declined a tool, and
-                                               # evaluate_exit verified it's done
+        return "finalize"
     return "act"
+
+## --- Ch6: context management helpers (6.4) ---------------------------------
+## Repo glue: cheap token estimate + a guided, lossy summary. Swap count_tokens
+## for your provider's tokenizer if you need exact counts.
+
+def count_tokens(messages) -> int:
+    return sum(len(str(getattr(m, "content", m))) for m in messages) // 4
+
+def needs_compression(state, config) -> bool:
+    return count_tokens(state["messages"]) > config.context_token_budget
+
+def summarize_preserving(messages, must_keep=("decisions", "commitments",
+                                              "key facts", "open questions")) -> str:
+    """Lossy, but guided (6.4): summarize old context, preserving what matters."""
+    text = "\n".join(str(getattr(m, "content", m)) for m in messages)
+    try:
+        response = llm.invoke(
+            f"Summarize this conversation excerpt in under 200 words. "
+            f"You MUST preserve: {', '.join(must_keep)}.\n\n{text[:20_000]}"
+        )
+        return response.content
+    except Exception:
+        return text[:2_000] + " …[truncated summary — summarizer unavailable]"
+
+## --- Ch6: recall before reasoning (6.7) ------------------------------------
+## agent/graph.py — a recall step before the first reason step.
+from langchain_core.messages import SystemMessage
+
+def recall_node(state: AgentState) -> dict:
+    """Retrieve long-term memories relevant to the goal and inject them
+    as context BEFORE reasoning. Namespace-scoped, thresholded (6.2)."""
+    memories = memory.recall(state["goal"], k=5, min_score=0.75)
+    if not memories:
+        return {}                                   # nothing relevant; no-op
+    recalled = "\n".join(f"- {m.text}" for m in memories)
+    return {"messages": [SystemMessage(
+        content=f"[Relevant memories about this user]\n{recalled}"
+    )]}
+
+## --- Ch6: compression node (6.4) -------------------------------------------
+from langchain_core.messages import RemoveMessage, SystemMessage
+
+def compress_node(state: AgentState) -> dict:
+    """Run when context exceeds budget: archive + summarize the old middle."""
+    msgs = state["messages"]
+    if count_tokens(msgs) <= CONFIG.context_token_budget:
+        return {}                                   # no-op under budget
+
+    keep_recent = msgs[-CONFIG.keep_recent:]
+    old = msgs[2:-CONFIG.keep_recent]               # preserve system+goal at [0:2]
+
+    memory.archive_messages(old)                    # to pgvector (6.2), retrievable
+    digest = summarize_preserving(old)
+
+    # Remove the old messages (by id) and inject the digest in their place.
+    removals = [RemoveMessage(id=m.id) for m in old]
+    return {"messages": removals + [SystemMessage(content=f"[Earlier context] {digest}")]}
+
+## --- Ch6: routing with compression (6.7) ------------------------------------
+
+def route_with_compression(state: AgentState) -> str:
+    """Same exit logic as Ch4's route, plus a context-budget check that
+    diverts to compression instead of growing the window unbounded.
+
+    Order matters: a STOP decision always wins. We let the Ch4 route run
+    first so that an over-budget/deadlocked run finalizes; only if the run
+    is continuing do we consider compressing. This guarantees an over-budget
+    AND over-context run exits cleanly rather than compressing forever."""
+    decision = route(state)                    # Ch4 route: act/finalize/feedback
+    if decision == "finalize":                 # evaluate_exit said stop — honor it
+        return "finalize"
+    if needs_compression(state, CONFIG):       # continuing, but context too big?
+        return "compress"
+    return decision                            # act, or reason_with_feedback
 
 ## Repo glue: LangGraph routers receive a state snapshot — writes made inside
 ## `route` don't persist to channels. Shadow-wrap Ch3's finalize_node so the
 ## exit decision is recorded in-node before it reads exit_reason (3.16).
+_finalize_node_impl = finalize_node
+
 def finalize_node(state):
     if not state.get("exit_reason"):
         decision = evaluate_exit(state, CONFIG)
         if decision.stop:
             state = {**state, "exit_reason": decision.reason}
-    update = loop_finalize_node(state)
+    update = _finalize_node_impl(state)
     exit_reason = state.get("exit_reason")
     if "exit_reason" not in update and isinstance(exit_reason, str):
         update["exit_reason"] = exit_reason
     return update
 
 graph = StateGraph(AgentState)
-graph.add_node("reason", reason_node)
-graph.add_node("act", act_node)
-graph.add_node("finalize", finalize_node)      # from Ch3 — honest partial output
-graph.set_entry_point("reason")
-graph.add_conditional_edges("reason", route,
+graph.add_node("recall", recall_node)          # NEW: retrieve before reasoning
+graph.add_node("reason", reason_node)          # Ch4, unchanged
+graph.add_node("act", act_node)                # Ch5 tools, Ch4 node, unchanged
+graph.add_node("compress", compress_node)      # NEW: bound the context (6.4)
+graph.add_node("finalize", finalize_node)      # Ch3, unchanged
+
+graph.set_entry_point("recall")                # recall -> reason at the start
+graph.add_edge("recall", "reason")
+graph.add_conditional_edges("reason", route_with_compression,
                             {"act": "act",
+                             "compress": "compress",
                              "finalize": "finalize",
                              "reason_with_feedback": "reason"})
 graph.add_edge("act", "reason")
+graph.add_edge("compress", "reason")           # after compressing, keep reasoning
 graph.add_edge("finalize", END)
-app = graph.compile()
+
+## The shared stores, imported (not rebuilt) — see agent/memory_backend.py.
+## Same Postgres backs both the checkpointer and long-term memory (6.6).
+from agent.memory_backend import checkpointer, memory
+app = graph.compile(checkpointer=checkpointer)
 
 
 def build_graph(config):
-    """Factory: build and compile the agent graph from a config.
-    The harness calls build_graph(config) and wraps the result."""
-
-    llm = ChatOpenAI(model=config.model.name, temperature=config.model.temperature)
-    llm_with_tools = llm.bind_tools(TOOLS)
-
-    def reason_node(state):
-        # criteria-not-met push-back (3.10): surface the gap before re-reasoning
-        messages = [SystemMessage(content=SYSTEM_PROMPT)] + state["messages"]
-        if state.get("pending_feedback"):
-            messages.append(SystemMessage(content=state["pending_feedback"]))
-        response = llm_with_tools.invoke(messages)
-        usage = response.response_metadata.get("token_usage", {})
-        return {
-            "messages": [response],                                  # add_messages reducer
-            "iterations": state["iterations"] + 1,
-            "tokens_used": state["tokens_used"] + usage.get("total_tokens", 0),
-            "pending_feedback": None,
-        }
-
-    def act_node(state):
-        observations = []
-        seen = state.get("seen_signatures", set())     # read existing accumulator
-        new_signatures = set()
-        new_history = []
-        last = state["messages"][-1]
-        for call in getattr(last, "tool_calls", None) or []:
-            sig = (call["name"], frozenset(call["args"].items()))
-            new_history.append(sig)
-            if sig in seen:
-                observations.append(ToolMessage(
-                    tool_call_id=call["id"],
-                    content=(f"NOTE: you already ran {call['name']} with these exact "
-                             f"arguments and it did not advance the goal. Do NOT repeat it. "
-                             f"Try a materially different approach or report what's blocking you."),
-                ))
-                continue
-            result = TOOLS_BY_NAME[call["name"]].invoke(call["args"])
-            new_signatures.add(sig)
-            observations.append(ToolMessage(tool_call_id=call["id"],
-                                            content=format_tool_result(call, result)))
-        return {
-            "messages": observations,                       # add_messages merges by id
-            "seen_signatures": seen | new_signatures,        # read-then-return the UNION
-            "action_history": new_history,                   # additive reducer appends
-            # convergence tracking runs once per iteration, in the observe step (3.12)
-            **update_convergence_tracking(state),
-        }
-
-    def route(state) -> str:
-        if state.get("cancel_requested"):
-            state["exit_reason"] = "cancelled"
-            return "finalize"        # clean exit on cancellation (3.15)
-        decision = evaluate_exit(state, config)      # all the logic in one call (3.10)
-        if decision.stop:
-            # record WHY in state so finalize and the trace can read it
-            state["exit_reason"] = decision.reason
-            return "finalize"                        # a node that writes the final answer
-        if decision.feedback:
-            # model thought it was done but criteria failed: inject the gap, re-reason
-            state["pending_feedback"] = decision.feedback
-            return "reason_with_feedback"
-        last = state["messages"][-1]
-        if getattr(last, "tool_calls", None):
-            return "act"
-        return "reason"
-
-    def record_exit_and_finalize(state):
-        """Repo glue: LangGraph routers receive a state snapshot — writes made
-        inside `route` don't persist to channels. Recompute the exit decision
-        here, in a node, so finalize_node (3.16) sees WHY we stopped."""
-        if not state.get("exit_reason"):
-            decision = evaluate_exit(state, config)
-            if decision.stop:
-                state = {**state, "exit_reason": decision.reason}
-        update = loop_finalize_node(state)
-        exit_reason = state.get("exit_reason")
-        if "exit_reason" not in update and isinstance(exit_reason, str):
-            update["exit_reason"] = exit_reason
-        return update
-
-    graph = StateGraph(AgentState)
-    graph.add_node("reason", reason_node)
-    graph.add_node("act", act_node)
-    graph.add_node("finalize", record_exit_and_finalize)   # honest exits (3.16)
-    graph.set_entry_point("reason")
-    graph.add_conditional_edges("reason", route,
-                                {"act": "act",
-                                 "finalize": "finalize",
-                                 "reason_with_feedback": "reason",
-                                 "reason": "reason"})
-    graph.add_edge("act", "reason")                  # observe -> back to reason
-    graph.add_edge("finalize", END)
-    return graph.compile()
+    """Kept for the harness/run entry point: the compiled agent above."""
+    return app
