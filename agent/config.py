@@ -1,6 +1,6 @@
 ## agent/config.py — HarnessConfig + the four sub-configs (3.6);
 ## ToolConfig default updated to the real suite (5.6); context budgets (6.4);
-## guardrail settings (7.2–7.3).
+## guardrail settings (7.2–7.3); per-role scoped configs + supervisor budget (8.3–8.6).
 import os
 from dataclasses import dataclass, field
 
@@ -63,6 +63,7 @@ class HarnessConfig:
     scope: str = "general"               # topic scope for the input guard (7.2)
     allowed_pii: list[str] = field(default_factory=list)   # output guard (7.4)
     max_actions_per_run: int = 24        # per-run action budget (7.3)
+    max_supervisor_steps: int = 8        # NEW: ceiling on supervisor delegations
 
 
 ## The shared module-level config (imported as `from agent.config import CONFIG`
@@ -73,3 +74,33 @@ CONFIG = HarnessConfig(
         connection_string=os.environ.get("DATABASE_URL"),
     ),
 )
+
+## The shared model client, used throughout the book (Ch8's supervisor chain,
+## the graph factory, and the Ch10 judge all import this).
+from langchain_openai import ChatOpenAI    # swap for your provider
+
+llm = ChatOpenAI(model=CONFIG.model.name, temperature=CONFIG.model.temperature)
+
+
+## agent/config.py — per-role scoped configs. Each compiles (via worker_for) into
+## the SAME guarded agent (Ch7), differing only in tool scope and system prompt.
+## Least privilege = specialization.
+ROLE_CONFIGS = {
+    "research": HarnessConfig(
+        tools=ToolConfig(enabled_tools=["web_search", "read_file"]),  # no write, no compute
+        # system prompt: "You research and report findings. You do not write files."
+    ),
+    "compute": HarnessConfig(
+        tools=ToolConfig(enabled_tools=["calculator", "run_python"]),  # no web, no write
+    ),
+    "writer": HarnessConfig(
+        tools=ToolConfig(enabled_tools=["read_file", "write_file"]),   # can persist results
+        require_approval=True,        # writing is high-stakes -> Ch7 approval gate
+    ),
+}
+
+def build_subagent_config(role: str) -> HarnessConfig:
+    """Return the scoped config for a role; raises on an unknown role (fail closed)."""
+    if role not in ROLE_CONFIGS:
+        raise ValueError(f"unknown subagent role: {role}")
+    return ROLE_CONFIGS[role]
