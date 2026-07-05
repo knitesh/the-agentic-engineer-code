@@ -1,31 +1,23 @@
 # agent/run.py
-from dataclasses import dataclass
-
 from dotenv import load_dotenv
-from langchain_core.messages import HumanMessage
 
+from agent.config import HarnessConfig, ModelConfig
 from agent.graph import build_graph
+from agent.harness import AgentHarness
+from agent.sinks import Sinks
 
 load_dotenv()
 
 
-@dataclass
-class MiniConfig:                # Chapter 3 replaces this with HarnessConfig
-    model_name: str = "gpt-4o"
-    temperature: float = 0.0
-
-
 def main():
-    app = build_graph(MiniConfig())
-    goal = "What is 17% of 4,200, then add 90?"
-    initial_state = {
-        "messages": [HumanMessage(content=goal)],
-        "goal": goal,
-        "iterations": 0,
-        "final_answer": None,
-    }
-    final_state = app.invoke(initial_state)
-    print(final_state["final_answer"])
+    config = HarnessConfig(model=ModelConfig(name="gpt-4o", temperature=0.0))
+    harness = AgentHarness(build_graph(config), config, sinks=Sinks())
+
+    # single-shot
+    print(harness.run_single("what is 17% of 4,200, then add 90?"))
+
+    # interactive (same agent, threaded session)
+    print(harness.run_interactive("sess-1", "and what's that times 3?"))
 
 
 if __name__ == "__main__":
