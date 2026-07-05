@@ -21,3 +21,6 @@ class AgentState(TypedDict):
     exit_reason: str | None                       # WHY we stopped — recorded for traces
     final_answer: str | None
     status: str | None                            # "complete" | "incomplete"
+    # --- Ch7-added fields (declared additions; seeded by the injector / 8.3) ---
+    guard_block: str | None                       # input-guard verdict (7.8)
+    approval_granted: bool                        # human decision at the gate (7.8/Ch12)

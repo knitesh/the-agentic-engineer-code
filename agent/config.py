@@ -1,5 +1,6 @@
 ## agent/config.py — HarnessConfig + the four sub-configs (3.6);
-## ToolConfig default updated to the real suite (5.6); context budgets (6.4).
+## ToolConfig default updated to the real suite (5.6); context budgets (6.4);
+## guardrail settings (7.2–7.3).
 import os
 from dataclasses import dataclass, field
 
@@ -52,11 +53,16 @@ class HarnessConfig:
     stall_threshold: int = 3           # iterations of no progress -> divergence (3.12)
     # re-entry policy (3.15): "reject" | "queue" | "interrupt" | "incorporate"
     re_entry_policy: str = "queue"
-    # --- action boundaries (5.7) — pre-wired here, consumed by Ch7's approval gate ---
+    # --- action boundaries (5.7) — pre-wired in Ch5, consumed by Ch7's approval gate ---
     require_approval: bool = False
     # --- context management budgets (6.4) ---
     context_token_budget: int = 24_000   # compress when the window exceeds this
     keep_recent: int = 8                 # messages kept verbatim after compression
+    # --- guardrails (7.2–7.3) ---
+    max_input_chars: int = 4_000         # front-door structural bound (7.2)
+    scope: str = "general"               # topic scope for the input guard (7.2)
+    allowed_pii: list[str] = field(default_factory=list)   # output guard (7.4)
+    max_actions_per_run: int = 24        # per-run action budget (7.3)
 
 
 ## The shared module-level config (imported as `from agent.config import CONFIG`

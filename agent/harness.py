@@ -51,6 +51,9 @@ def inject_input(raw_request: dict) -> dict:
         "exit_reason": None,
         "final_answer": None,
         "status": None,
+        # Ch7-added fields (8.3 calls these out): guard verdict + human decision
+        "guard_block": None,
+        "approval_granted": False,
     }
 
 
